@@ -1,5 +1,6 @@
+
 import React, { useRef, useEffect } from 'react';
-import { Marble, PhysicsConfig, LineSegment, CircleObstacle, DynamicObstacle, Particle, ObstacleSettings } from '../types';
+import { Marble, PhysicsConfig, LineSegment, CircleObstacle, DynamicObstacle, Particle, ObstacleSettings, GameMode, SoccerBallItem } from '../types';
 import { audio } from '../services/audioService';
 
 interface RaceEngineProps {
@@ -7,14 +8,35 @@ interface RaceEngineProps {
   config: PhysicsConfig;
   obstacleSettings: ObstacleSettings;
   onRaceFinish: (results: Marble[]) => void;
+  onMarblesUpdate?: (marbles: Marble[]) => void;
   betMarbleId: number | null;
   isPaused: boolean;
   isFollowingBet: boolean;
+  gameMode: GameMode;
+  zoom: number;
+  onZoomChange: (newZoom: number) => void;
+  onElimination?: (id: number) => void;
 }
 
-const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacleSettings, onRaceFinish, betMarbleId, isPaused, isFollowingBet }) => {
+const RaceEngine: React.FC<RaceEngineProps> = ({ 
+  activeMarbles, 
+  config, 
+  obstacleSettings, 
+  onRaceFinish, 
+  onMarblesUpdate,
+  betMarbleId, 
+  isPaused, 
+  isFollowingBet, 
+  gameMode,
+  zoom,
+  onZoomChange,
+  onElimination
+}) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const requestRef = useRef<number>();
+  
+  // Touch Handling for Pinch-to-Zoom
+  const lastTouchDist = useRef<number | null>(null);
   
   // Physics State (Mutable refs for performance)
   const marblesRef = useRef<Marble[]>([]);
@@ -22,6 +44,7 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
   const pinsRef = useRef<CircleObstacle[]>([]);
   const dynamicRef = useRef<DynamicObstacle[]>([]);
   const particlesRef = useRef<Particle[]>([]); 
+  const soccerBallsRef = useRef<SoccerBallItem[]>([]);
   const teleportCooldowns = useRef<Record<number, number>>({});
   
   // Cache for loaded images
@@ -33,6 +56,8 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
   const startTime = useRef(0);
   const timeRef = useRef(0);
   const gateOpenRef = useRef(false);
+  const lastEliminationTime = useRef(0);
+  const ELIMINATION_INTERVAL = 12000; // 12 seconds
 
   // Constants
   const COURSE_WIDTH = 600;
@@ -40,7 +65,7 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
   const GATE_DELAY = 3000; // Time before gate opens (ms)
   
   // --- Particle Helper ---
-  const spawnParticles = (x: number, y: number, color: string, count: number = 5, speed: number = 2) => {
+  const spawnParticles = (x: number, y: number, color: string, count: number = 5, speed: number = 2, size: number = 2) => {
     for (let i = 0; i < count; i++) {
       const angle = Math.random() * Math.PI * 2;
       const velocity = Math.random() * speed;
@@ -50,11 +75,31 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
         vx: Math.cos(angle) * velocity,
         vy: Math.sin(angle) * velocity,
         life: 1.0,
-        decay: 0.02 + Math.random() * 0.03, // Random fade speed
+        decay: 0.015 + Math.random() * 0.02, // Slower fade
         color: color,
-        size: 1 + Math.random() * 2
+        size: (1 + Math.random() * size) * 1.5
       });
     }
+  };
+
+  const spawnFinishParticles = (x: number, y: number, color: string) => {
+      // Confetti burst
+      for (let i = 0; i < 40; i++) {
+          const angle = -Math.PI/2 + (Math.random() - 0.5) * Math.PI;
+          const velocity = 5 + Math.random() * 10;
+          particlesRef.current.push({
+              x, y,
+              vx: Math.cos(angle) * velocity,
+              vy: Math.sin(angle) * velocity,
+              life: 1.0,
+              decay: 0.01 + Math.random() * 0.01,
+              color: `hsl(${Math.random() * 360}, 100%, 50%)`,
+              size: 2 + Math.random() * 3
+          });
+      }
+      // Sparkles
+      spawnParticles(x, y, '#fff', 20, 5, 2);
+      spawnParticles(x, y, color, 20, 8, 3);
   };
 
   // --- Level Generation ---
@@ -74,9 +119,13 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
     const plinkoRowHeight = 55; 
     const plinkoEndY = plinkoStartY + (plinkoRows * plinkoRowHeight);
 
-    // Paredes
-    lines.push({ x1: 0, y1: 0, x2: 0, y2: plinkoEndY, type: 'wall' }); 
-    lines.push({ x1: COURSE_WIDTH, y1: 0, x2: COURSE_WIDTH, y2: plinkoEndY, type: 'wall' }); 
+    // Starting Side Walls
+    lines.push({ x1: 0, y1: 0, x2: 0, y2: GATE_Y, type: 'wall' }); 
+    lines.push({ x1: COURSE_WIDTH, y1: 0, x2: COURSE_WIDTH, y2: GATE_Y, type: 'wall' }); 
+
+    // Main Walls
+    lines.push({ x1: 0, y1: GATE_Y, x2: 0, y2: plinkoEndY, type: 'wall' }); 
+    lines.push({ x1: COURSE_WIDTH, y1: GATE_Y, x2: COURSE_WIDTH, y2: plinkoEndY, type: 'wall' }); 
 
     // Gerar Pinos Móveis com Espaçamento Igual
     for (let r = 0; r < plinkoRows; r++) {
@@ -439,6 +488,23 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
     linesRef.current = lines;
     pinsRef.current = pins;
     dynamicRef.current = dynamics;
+
+    // Spawn soccer balls for World Cup mode
+    if (gameMode === 'world_cup') {
+        const soccerBalls: SoccerBallItem[] = [];
+        const numBalls = 8 + Math.floor(Math.random() * 5);
+        for (let j = 0; j < numBalls; j++) {
+            soccerBalls.push({
+                id: `sb_${j}`,
+                x: 50 + Math.random() * (COURSE_WIDTH - 100),
+                y: GATE_Y + 150 + Math.random() * (finishLineY.current - GATE_Y - 300),
+                collected: false
+            });
+        }
+        soccerBallsRef.current = soccerBalls;
+    } else {
+        soccerBallsRef.current = [];
+    }
   };
 
   // --- Physics Logic ---
@@ -460,8 +526,8 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
     if (!gateOpenRef.current) {
         if (timeSinceStart > GATE_DELAY) {
             gateOpenRef.current = true;
-            audio.playPinHit(15); // Loud gong/sound for start
-            spawnParticles(COURSE_WIDTH/2, GATE_Y, '#10b981', 30, 8); // Explosion of green particles
+            audio.playPinHit(15); 
+            spawnParticles(COURSE_WIDTH/2, GATE_Y, '#10b981', 30, 8);
         }
     }
 
@@ -490,7 +556,7 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
     const activeMarblesCount = marbles.filter(m => !m.finished).length;
     const totalMarbles = marbles.length;
     
-    if (totalMarbles > 1 && activeMarblesCount === 1) {
+    if (totalMarbles > 1 && activeMarblesCount === 1 && gameMode !== 'inverted_elimination' && gameMode !== 'world_cup') {
         const loser = marbles.find(m => !m.finished);
         if (loser) {
             loser.finished = true;
@@ -585,6 +651,14 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
         m.vy += config.gravity * dt;
         m.x += m.vx * dt;
         m.y += m.vy * dt;
+
+        // Trail Update
+        if (timeRef.current % 2 === 0) {
+            m.trail.push({ x: m.x, y: m.y });
+            if (m.trail.length > 20) {
+                m.trail.shift();
+            }
+        }
 
         // --- SAFETY BOUNDARIES ---
         if (m.x < m.radius) {
@@ -809,11 +883,36 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
           const finishedSoFar = marbles.filter(b => b.finished).length;
           m.rank = finishedSoFar;
           audio.playPinHit(10);
-          spawnParticles(m.x, m.y, '#10b981', 10, 4);
+          spawnFinishParticles(m.x, m.y, m.color);
+
+          // NEW: In Inverted Elimination, the race ends as soon as the first marble crosses.
+          if (gameMode === 'inverted_elimination' && !raceFinished.current) {
+              raceFinished.current = true;
+              onRaceFinish(marblesRef.current);
+              return;
+          }
         }
         
         if (!m.finished) {
             totalSpeed += Math.sqrt(m.vx*m.vx + m.vy*m.vy + m.omega*m.radius*m.omega*m.radius);
+            
+            // Check Soccer Ball Collection (World Cup Mode)
+            if (gameMode === 'world_cup') {
+                for (const sb of soccerBallsRef.current) {
+                    if (!sb.collected) {
+                        const dx = m.x - sb.x;
+                        const dy = m.y - sb.y;
+                        const distSq = dx*dx + dy*dy;
+                        const collectDist = m.radius + 15;
+                        if (distSq < collectDist * collectDist) {
+                            sb.collected = true;
+                            m.collectedItems++;
+                            audio.playPinHit(5); 
+                            spawnParticles(sb.x, sb.y, '#fff', 10, 3);
+                        }
+                    }
+                }
+            }
         }
       }
     }
@@ -852,6 +951,10 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
     
     cameraY.current += (targetY - cameraY.current) * 0.08;
 
+    if (onMarblesUpdate && timeRef.current % 5 === 0) {
+        onMarblesUpdate([...marblesRef.current]);
+    }
+
     if (marbles.filter(m => !m.finished).length === 0) {
       if (!raceFinished.current) {
         raceFinished.current = true;
@@ -869,8 +972,9 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
     const intensity = Math.abs(vDotN);
     if (intensity > 1.0) {
         audio.playBump(intensity);
-        if (intensity > 3.0) {
-            spawnParticles(cx, cy, isBouncy ? '#ef4444' : '#94a3b8', Math.floor(intensity), intensity * 0.5);
+        if (intensity > 2.0) {
+            const particleColor = isBouncy ? '#ef4444' : (intensity > 5 ? '#fff' : '#94a3b8');
+            spawnParticles(cx, cy, particleColor, Math.floor(intensity * 2), intensity * 0.6, intensity * 0.2);
         }
     }
 
@@ -984,10 +1088,12 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
       if (dot > 0) {
          if (dot > 2) {
              audio.playPinHit(dot * 0.5);
-             if (dot > 5) {
+             if (dot > 3) {
                  const cx = m1.x + nx * m1.radius;
                  const cy = m1.y + ny * m1.radius;
-                 spawnParticles(cx, cy, '#fff', 3, 2);
+                 spawnParticles(cx, cy, '#fff', Math.floor(dot * 1.5), dot * 0.4, 1.5);
+                 spawnParticles(cx, cy, m1.color, Math.floor(dot), dot * 0.3, 1);
+                 spawnParticles(cx, cy, m2.color, Math.floor(dot), dot * 0.3, 1);
              }
          }
 
@@ -1010,8 +1116,8 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
     timeRef.current = 0;
     teleportCooldowns.current = {};
     particlesRef.current = [];
+    lastEliminationTime.current = 0;
 
-    // Preload Images
     activeMarbles.forEach(m => {
         const img = new Image();
         img.src = m.logoUrl;
@@ -1033,7 +1139,9 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
       angle: 0,
       omega: 0,
       finished: false,
-      rank: 0
+      rank: 0,
+      trail: [],
+      collectedItems: 0
     }));
     
     audio.resume();
@@ -1188,19 +1296,20 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
       return b.y - a.y;
     });
 
-    const boxWidth = 110; // Slightly wider for names
-    const itemHeight = 18;
+    const boxWidth = 40; 
+    const itemHeight = 20;
     const startX = 10; 
     const startY = 90; 
 
     ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+    ctx.beginPath();
     ctx.roundRect(startX, startY, boxWidth, sorted.length * itemHeight + 10, 6);
     ctx.fill();
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
     ctx.lineWidth = 1;
     ctx.stroke();
 
-    ctx.font = 'bold 10px "Roboto Mono"'; 
+    ctx.font = 'bold 9px "Roboto Mono"'; 
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
 
@@ -1208,16 +1317,30 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
        const y = startY + 10 + index * itemHeight; 
        
        ctx.fillStyle = index === 0 ? '#fbbf24' : index === 1 ? '#9ca3af' : index === 2 ? '#b45309' : '#6b7280';
-       ctx.fillText(`${index + 1}.`, startX + 5, y);
+       ctx.fillText(`${index + 1}`, startX + 5, y);
 
-       // Small colored dot fallback if needed, but mainly name color
-       ctx.fillStyle = m.color; 
-       ctx.beginPath();
-       ctx.arc(startX + 25, y, 3, 0, Math.PI*2);
-       ctx.fill();
-
-       ctx.fillStyle = m.finished ? '#10b981' : '#e5e7eb';
-       ctx.fillText(m.name, startX + 35, y);
+       const img = imagesRef.current[m.id];
+       const iconSize = 14;
+       
+       if (img && img.complete && img.naturalHeight !== 0) {
+           ctx.save();
+           ctx.beginPath();
+           ctx.arc(startX + 25, y, iconSize / 2, 0, Math.PI * 2);
+           ctx.clip();
+           ctx.drawImage(img, startX + 25 - iconSize / 2, y - iconSize / 2, iconSize, iconSize);
+           ctx.restore();
+           
+           ctx.beginPath();
+           ctx.arc(startX + 25, y, iconSize / 2, 0, Math.PI * 2);
+           ctx.strokeStyle = m.finished ? '#10b981' : m.color;
+           ctx.lineWidth = 1;
+           ctx.stroke();
+       } else {
+           ctx.fillStyle = m.color; 
+           ctx.beginPath();
+           ctx.arc(startX + 25, y, 4, 0, Math.PI*2);
+           ctx.fill();
+       }
        
        if (m.id === betMarbleId) {
           ctx.strokeStyle = '#fbbf24';
@@ -1244,14 +1367,21 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     ctx.save();
-    const scale = canvas.width / COURSE_WIDTH;
-    ctx.scale(scale, scale);
-    const camY = Math.max(0, Math.min(cameraY.current, finishLineY.current - canvas.height/scale + 100));
+    const baseScale = canvas.width / COURSE_WIDTH;
+    const finalScale = baseScale * zoom;
+    ctx.scale(finalScale, finalScale);
+    
+    // Center the course if zoomed out
+    const offsetX = (canvas.width / finalScale - COURSE_WIDTH) / 2;
+    ctx.translate(offsetX, 0);
+
+    const camY = Math.max(0, Math.min(cameraY.current, finishLineY.current - canvas.height/finalScale + 100));
     ctx.translate(0, -camY);
 
     // Draw Static Lines
     ctx.lineWidth = 4;
     ctx.lineCap = 'round';
+
     linesRef.current.forEach(l => {
       ctx.strokeStyle = l.type === 'wall' ? '#4b5563' : '#60a5fa';
       if (l.type === 'wall') ctx.lineWidth = 6;
@@ -1366,6 +1496,63 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
         ctx.fillText("PREPARAR...", COURSE_WIDTH / 2, GATE_Y + 180);
     }
 
+
+    // Draw Soccer Balls (World Cup Mode)
+    if (gameMode === 'world_cup') {
+        soccerBallsRef.current.forEach(sb => {
+            if (!sb.collected) {
+                ctx.save();
+                ctx.translate(sb.x, sb.y);
+                
+                // Solid White Background
+                ctx.beginPath();
+                ctx.arc(0, 0, 15, 0, Math.PI * 2);
+                ctx.fillStyle = '#ffffff';
+                ctx.fill();
+                
+                // Black Outline
+                ctx.strokeStyle = '#000000';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                
+                // Soccer Pattern
+                ctx.fillStyle = '#0a0a0a';
+                // Center pentagon
+                ctx.beginPath();
+                for (let i = 0; i < 5; i++) {
+                    const angle = (i * Math.PI * 2) / 5 - Math.PI / 2;
+                    const px = Math.cos(angle) * 5;
+                    const py = Math.sin(angle) * 5;
+                    if (i === 0) ctx.moveTo(px, py);
+                    else ctx.lineTo(px, py);
+                }
+                ctx.closePath();
+                ctx.fill();
+
+                // Outer pentagons (partial)
+                for (let i = 0; i < 5; i++) {
+                    const angle = (i * Math.PI * 2) / 5 - Math.PI / 2;
+                    ctx.save();
+                    ctx.translate(Math.cos(angle) * 11, Math.sin(angle) * 11);
+                    ctx.rotate(angle + Math.PI);
+                    ctx.beginPath();
+                    for (let j = 0; j < 5; j++) {
+                        const subAngle = (j * Math.PI * 2) / 5 - Math.PI / 2;
+                        const spx = Math.cos(subAngle) * 4;
+                        const spy = Math.sin(subAngle) * 4;
+                        if (j === 0) ctx.moveTo(spx, spy);
+                        else ctx.lineTo(spx, spy);
+                    }
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.restore();
+                }
+                
+                ctx.restore();
+            }
+        });
+    }
+
     drawParticles(ctx);
 
     pinsRef.current.forEach(p => {
@@ -1375,7 +1562,7 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
       ctx.fill();
     });
 
-    // Draw Finish Line
+    // Draw Finish Area
     ctx.fillStyle = '#10b981';
     ctx.fillRect(0, finishLineY.current, COURSE_WIDTH, 10);
     for(let i=0; i<20; i++) {
@@ -1385,6 +1572,22 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
 
     // Draw Marbles
     marblesRef.current.forEach(m => {
+      // Draw Trail
+      if (m.trail.length > 1) {
+          ctx.beginPath();
+          ctx.moveTo(m.trail[0].x, m.trail[0].y);
+          for (let i = 1; i < m.trail.length; i++) {
+              ctx.lineTo(m.trail[i].x, m.trail[i].y);
+          }
+          ctx.strokeStyle = m.color;
+          ctx.lineWidth = m.radius * 0.6;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          ctx.globalAlpha = 0.3;
+          ctx.stroke();
+          ctx.globalAlpha = 1.0;
+      }
+
       ctx.save();
       ctx.translate(m.x, m.y);
       ctx.rotate(-m.angle); 
@@ -1406,7 +1609,21 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
       
       const img = imagesRef.current[m.id];
       if (img && img.complete && img.naturalHeight !== 0) {
-        ctx.drawImage(img, -m.radius, -m.radius, m.radius * 2, m.radius * 2);
+        const imgAspect = img.naturalWidth / img.naturalHeight;
+        const targetSize = m.radius * 2;
+        let drawWidth, drawHeight;
+
+        if (imgAspect > 1) {
+          // Wide image
+          drawHeight = targetSize;
+          drawWidth = targetSize * imgAspect;
+        } else {
+          // Tall image
+          drawWidth = targetSize;
+          drawHeight = targetSize / imgAspect;
+        }
+
+        ctx.drawImage(img, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
       } else {
         // Fallback: Solid Color if image fails
         ctx.fillStyle = m.color;
@@ -1448,8 +1665,50 @@ const RaceEngine: React.FC<RaceEngineProps> = ({ activeMarbles, config, obstacle
 
     ctx.restore(); 
 
-    drawLeaderboard(ctx, canvas.width, canvas.height);
+    if (gameMode !== 'world_cup') {
+        drawLeaderboard(ctx, canvas.width, canvas.height);
+    }
   };
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const handleTouchStart = (e: TouchEvent) => {
+        if (e.touches.length === 2) {
+            const dx = e.touches[0].clientX - e.touches[1].clientX;
+            const dy = e.touches[0].clientY - e.touches[1].clientY;
+            lastTouchDist.current = Math.sqrt(dx * dx + dy * dy);
+        }
+    };
+
+    const handleTouchMove = (e: TouchEvent) => {
+        if (e.touches.length === 2 && lastTouchDist.current !== null) {
+            const dx = e.touches[0].clientX - e.touches[1].clientX;
+            const dy = e.touches[0].clientY - e.touches[1].clientY;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            
+            const delta = dist / lastTouchDist.current;
+            const newZoom = Math.max(0.3, Math.min(3.0, zoom * delta));
+            onZoomChange(newZoom);
+            lastTouchDist.current = dist;
+        }
+    };
+
+    const handleTouchEnd = () => {
+        lastTouchDist.current = null;
+    };
+
+    canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+    canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+    canvas.addEventListener('touchend', handleTouchEnd);
+
+    return () => {
+        canvas.removeEventListener('touchstart', handleTouchStart);
+        canvas.removeEventListener('touchmove', handleTouchMove);
+        canvas.removeEventListener('touchend', handleTouchEnd);
+    };
+  }, [zoom, onZoomChange]);
 
   useEffect(() => {
     const loop = () => {

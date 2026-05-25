@@ -1,3 +1,4 @@
+
 export interface Marble {
   id: number;
   color: string;
@@ -14,6 +15,8 @@ export interface Marble {
   finished: boolean;
   finishTime: number;
   rank: number; // 0 if not finished
+  trail: { x: number, y: number }[];
+  collectedItems: number; // For World Cup mode goals
 }
 
 export interface LineSegment {
@@ -66,6 +69,13 @@ export interface Particle {
   size: number;
 }
 
+export interface SoccerBallItem {
+  id: string;
+  x: number;
+  y: number;
+  collected: boolean;
+}
+
 export interface PhysicsConfig {
   gravity: number;
   restitution: number; // Bounciness 0.1 to 0.9
@@ -84,7 +94,7 @@ export interface ObstacleSettings {
   funnel: boolean;
 }
 
-export type GameMode = 'elimination' | 'points' | 'cup';
+export type GameMode = 'elimination' | 'inverted_elimination' | 'points' | 'cup' | 'world_cup';
 
 export interface Match {
   id: string;
@@ -92,7 +102,8 @@ export interface Match {
   marbleIds: number[];
   type: 'group' | 'knockout';
   nextPhase?: boolean; // If true, triggers generation of next round matches
-  groupIndex?: number; // 0-3 for groups A-D
+  groupIndex?: number; // 0-11 for groups A-L
+  matchups?: [number, number][]; // [[team0Idx, team1Idx], [team2Idx, team3Idx]]
 }
 
 export interface GameState {
@@ -111,5 +122,13 @@ export interface GameState {
   currentMatchIndex: number;
   cupGroups: number[][]; // [ [id1, id2...], [id3, id4...] ]
   cupScores: Record<number, number>;
-  cupPhase: 'groups' | 'octavas' | 'quartas' | 'semi' | 'final';
+  cupGoals: Record<number, number>;
+  cupGoalsConceded: Record<number, number>;
+  cupMatchesPlayed: Record<number, number>;
+  cupPhase: 'groups' | 'groups_finished' | 'sixteenths' | 'octavas' | 'quartas' | 'semi' | 'final';
+  cupGroupScores?: Record<number, number>;
+  cupGroupGoals?: Record<number, number>;
+  cupGroupGoalsConceded?: Record<number, number>;
+  cupGroupMatchesPlayed?: Record<number, number>;
+  cupBestThirdPlacesIds?: number[];
 }

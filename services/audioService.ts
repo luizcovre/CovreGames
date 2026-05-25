@@ -1,3 +1,4 @@
+
 class AudioService {
   private ctx: AudioContext | null = null;
   private rollingNode: AudioBufferSourceNode | null = null;
@@ -71,17 +72,17 @@ class AudioService {
     const osc = this.ctx.createOscillator();
     const gain = this.ctx.createGain();
 
-    osc.type = 'triangle';
+    osc.type = 'sine';
     
-    // Pitch varies with intensity (harder = higher) + random jitter
-    const baseFreq = 100 + (intensity * 20);
-    osc.frequency.setValueAtTime(baseFreq + Math.random() * 50, now);
-    osc.frequency.exponentialRampToValueAtTime(50, now + 0.1);
+    // Satisfying high-pitched ping (crystal/marble style) instead of a dull thud, matching the user's request
+    const baseFreq = 750 + Math.random() * 150;
+    osc.frequency.setValueAtTime(baseFreq, now);
+    osc.frequency.exponentialRampToValueAtTime(300, now + 0.12);
 
     // Volume envelope
-    const vol = Math.min(intensity * 0.1, 0.8);
+    const vol = Math.min(intensity * 0.05, 0.4);
     gain.gain.setValueAtTime(vol, now);
-    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.12);
 
     osc.connect(gain);
     gain.connect(this.ctx.destination);
